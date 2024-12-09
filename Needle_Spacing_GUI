@@ -1,0 +1,619 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Aug 27 10:40:33 2024
+
+@author: yennefer.xie
+"""
+import pandas as pd
+import numpy as np
+from scipy.interpolate import make_interp_spline
+import os
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import matplotlib.pyplot as plt
+import re
+from datetime import datetime
+#%% ■■■■■■■■■函數定義區■■■■■■■■■
+# 初始化配置參數
+CONFIG = {
+    'zero_deg_index': 0,
+    'file_name_1': "",  # 第一個文件路徑
+    'file_name_2': "",  # 第二個文件路徑
+}
+
+def update_analysis_type():
+    """更新分析類型並配置UI"""
+    analysis_type = tolerance_var.get()
+    if analysis_type == "single":
+        file_button_2.grid_remove()
+        file_label_2.grid_remove()
+        needle2_width_label.grid_remove()
+        needle2_width_entry.grid_remove()
+    elif analysis_type == "mixed":
+        file_button_2.grid()
+        file_label_2.grid()
+        needle2_width_label.grid()
+        needle2_width_entry.grid()
+        
+def select_file_1():
+    """選擇第一個 Excel 文件"""
+    file_path = filedialog.askopenfilename(title="選擇Excel檔案 (第一個)", filetypes=[("Excel files", "*.xlsx")])
+    if file_path:
+        CONFIG['file_name_1'] = file_path
+        file_label_1.config(text=f"已選擇文件 1: {file_path}")
+    else:
+        file_label_1.config(text="未選擇文件 1")
+
+def select_file_2():
+    """選擇第二個 Excel 文件"""
+    file_path = filedialog.askopenfilename(title="選擇Excel檔案 (第二個)", filetypes=[("Excel files", "*.xlsx")])
+    if file_path:
+        CONFIG['file_name_2'] = file_path
+        file_label_2.config(text=f"已選擇文件 2: {file_path}")
+    else:
+        file_label_2.config(text="未選擇文件 2") 
+        
+def update_angle(delta):
+    """更新角度並重新繪製"""
+    # 更新 CONFIG 中的角度索引
+    CONFIG['zero_deg_index'] += delta
+    
+    # 防止角度超出範圍
+    if CONFIG['zero_deg_index'] < 0:
+        CONFIG['zero_deg_index'] = 0
+    elif CONFIG['zero_deg_index'] >= len(circle_points):
+        CONFIG['zero_deg_index'] = len(circle_points) - 1
+
+    # 移動 zero_needle 到指定 circle_point 位置
+    zero_needle = zero_xyz_data
+    second_needle = translate_data_to_circle_points(
+        needle_data=second_xyz_data, 
+        circle_points=circle_points, 
+        index=CONFIG['zero_deg_index']
+    )
+    # 繪製兩針位置
+    plot_3d_needle_positions(
+        zero_needle=zero_needle,
+        second_needle=second_needle,
+        circle_points=circle_points,
+        current_angle = CONFIG['zero_deg_index'] * CONFIG['degree_step'],
+        xy_threshold=CONFIG['xy_threshold'],
+        canvas_frame=canvas_frame
+    )
+    
+def save_image():
+    global fig, plt_name, output_folder
+    """保存當前圖像到本地"""
+    plt_name = re.sub(r'[<>:"/\\|?*]', ' ', plt_name)
+    # 獲取當前資料夾路徑
+    file_path = os.path.join(output_folder, f"{plt_name}.png")  # 完整的路徑
+
+    # 保存圖像
+    fig.savefig(file_path)  # 使用 matplotlib 的 savefig 方法
+    print(f"圖片已保存到: {file_path}")
+        
+def process_single_needle(select_file, needle_width, l_num, w_num, cavity):
+    """處理單個針數據，生成插值曲線並平移到 (0, 0, 0)"""
+
+    def sort_xyz_data(coor_data):
+        """提取和排序 XYZ 數據"""
+        outputdata = coor_data.sort_values(by=coor_data.columns[-1], ascending=True).dropna()
+        x = outputdata.iloc[:, 0].to_numpy()
+        y = outputdata.iloc[:, 1].to_numpy()
+        z = outputdata.iloc[:, 2].to_numpy()
+        return x, y, z
+
+    def process_coor_data(coor_data, needle_width):
+        """處理 coor_data，根據列數確認並補全數據"""
+        file_columns = 12
+        num_columns = coor_data.shape[1]
+        if num_columns == file_columns:
+            return coor_data
+        elif num_columns == file_columns // 2:
+            coor_data_copy = coor_data.iloc[:, :6].copy()
+            coor_data_copy.iloc[:, 1] += needle_width  # 第二列為 Y 軸數據
+            coor_data_copy.iloc[:, 4] += needle_width  # 第五列為 Y 軸數據
+            coor_data_new = pd.concat([coor_data, coor_data_copy], axis=1, ignore_index=True)
+            return coor_data_new
+        else:
+            raise ValueError(f"數據列數 {num_columns} 不符合預期，請檢查輸入文件。")
+            
+    def interp_xyz_data(x, y, z, num, cavity):
+        """對 XYZ 數據進行三次樣條插值"""
+        
+        t = np.linspace(0, 1, len(x))  # 定義插值的參數t
+        # 創建三次樣條插值
+        spline_x = make_interp_spline(t, x, k=3)
+        spline_y = make_interp_spline(t, y, k=3)
+        spline_z = make_interp_spline(t, z, k=3)
+        
+        # 更密集的插值範圍
+        t_new = np.linspace(0, 1, num)
+        interp_x = spline_x(t_new)
+        interp_y = spline_y(t_new)
+        interp_z = spline_z(t_new)
+        
+        interp_z = np.linspace(0, cavity, num)
+        
+        return interp_x, interp_y, interp_z
+    
+    # 處理數據
+    coor_data = pd.read_excel(select_file)
+    coor_data = process_coor_data(coor_data, needle_width)
+
+    # 提取和排序數據
+    x1, y1, z1 = sort_xyz_data(coor_data.iloc[:, 0:3])
+    x2, y2, z2 = sort_xyz_data(coor_data.iloc[:, 3:6])
+    x3, y3, z3 = sort_xyz_data(coor_data.iloc[:, 6:9])
+    x4, y4, z4 = sort_xyz_data(coor_data.iloc[:, 9:12])
+    all_xyz_data = [(x1, y1, z1), (x2, y2, z2), (x3, y3, z3), (x4, y4, z4)]
+
+    # 插值生成曲線
+    interp_data = [interp_xyz_data(x, y, z, l_num, cavity) for x, y, z in all_xyz_data]
+    needle = []
+    pairs = [(0, 1), (1, 3), (2, 3), (0, 2)]
+    for i, j in pairs:
+        x1, y1, z1 = interp_data[i]
+        x2, y2, z2 = interp_data[j]
+        for t in np.linspace(0, 1, w_num):
+            x_interp = x1 * (1 - t) + x2 * t
+            y_interp = y1 * (1 - t) + y2 * t
+            z_interp = z1 * (1 - t) + z2 * t
+            needle.append((x_interp, y_interp, z_interp))
+
+    # 計算平移向量並平移到中心點
+    first_values = [(data[0][-1], data[1][-1], data[2][-1]) for data in needle]
+    center_point = np.mean(first_values, axis=0)
+    translation_vector = -center_point
+    
+    translated_needle = []
+    for data in needle:
+        trans_x, trans_y, trans_z = data
+        translated_x = trans_x + translation_vector[0]
+        translated_y = trans_y + translation_vector[1]
+        translated_z = trans_z + translation_vector[2]
+        translated_needle.append((translated_x, translated_y, translated_z))
+
+    return translated_needle
+
+def translate_data_to_circle_points(needle_data, circle_points,index):
+    """平移 needle_data 到 circle_points 的每個位置"""
+    first_values = [(data[0][-1], data[1][-1], data[2][-1]) for data in needle_data]
+    center_point = np.mean(first_values, axis=0)
+    translation_vector = -center_point + np.array(circle_points[index])
+    translated_data = []
+    translation_vector = np.array(circle_points[index])
+    for x_interp, y_interp, z_interp in needle_data:
+        translated_x = x_interp + translation_vector[0]
+        translated_y = y_interp + translation_vector[1]
+        translated_z = z_interp + translation_vector[2]
+        translated_data.append((translated_x, translated_y, translated_z))
+    return translated_data
+
+def find_closest_points(xy_threshold, zero_needle, second_needle):
+    """ 
+    在同一 Z 軸高度下判斷兩組數據是否有交集，並修正距離數值
+    有交集的距離記錄為負，無交集的距離記錄為正
+    """
+    # 儲存結果
+    all_distances = []
+    intersection_distances = []
+    threshold_distances = []
+
+    for i in range(len(zero_needle[0][2])):  # 遍歷每個 Z 軸高度
+        z_value = zero_needle[0][2][i]  # 當前 Z 軸高度
+
+        # 提取對應 Z 軸的 XYZ 座標
+        zero_xyz = np.array([(x[i], y[i], z[i]) for x, y, z in zero_needle])
+        second_xyz = np.array([(x[i], y[i], z[i]) for x, y, z in second_needle])
+
+        # 計算 XY 平面的距離矩陣
+        distances_matrix = np.sqrt(
+            (zero_xyz[:, 0][:, np.newaxis] - second_xyz[:, 0])**2 +  # X座標差
+            (zero_xyz[:, 1][:, np.newaxis] - second_xyz[:, 1])**2    # Y座標差
+        )
+
+        # 提取每組數據的 X-Y 範圍
+        zero_min_x, zero_max_x = zero_xyz[:, 0].min(), zero_xyz[:, 0].max()
+        zero_min_y, zero_max_y = zero_xyz[:, 1].min(), zero_xyz[:, 1].max()
+        second_min_x, second_max_x = second_xyz[:, 0].min(), second_xyz[:, 0].max()
+        second_min_y, second_max_y = second_xyz[:, 1].min(), second_xyz[:, 1].max()
+
+        # 判斷是否有交集
+        has_intersection = (
+            zero_max_x > second_min_x and zero_min_x < second_max_x and
+            zero_max_y > second_min_y and zero_min_y < second_max_y
+        )
+
+        # 初始化修正後的距離矩陣
+        intersection_distances_matrix = distances_matrix.copy()
+
+        if has_intersection:
+            # 遍歷所有距離，僅修正有交集的點對距離
+            for zero_idx in range(len(zero_xyz)):
+                for second_idx in range(len(second_xyz)):
+                    if (
+                        zero_xyz[zero_idx, 0] >= second_min_x and
+                        zero_xyz[zero_idx, 0] <= second_max_x and
+                        zero_xyz[zero_idx, 1] >= second_min_y and
+                        zero_xyz[zero_idx, 1] <= second_max_y and
+                        second_xyz[second_idx, 0] >= zero_min_x and
+                        second_xyz[second_idx, 0] <= zero_max_x and
+                        second_xyz[second_idx, 1] >= zero_min_y and
+                        second_xyz[second_idx, 1] <= zero_max_y
+                    ):
+                        # 修正距離值為負
+                        intersection_distances_matrix[zero_idx, second_idx] *= -1
+
+        # 記錄結果
+        all_distances.append((z_value, distances_matrix))
+        intersection_distances.append((z_value, intersection_distances_matrix))
+
+         # 找出修正後距離小於閾值的點對
+        indices = np.argwhere(intersection_distances_matrix < xy_threshold)
+        for zero_idx, second_idx in indices:
+            zero_coord = zero_xyz[zero_idx]
+            second_coord = second_xyz[second_idx]
+            distance = intersection_distances_matrix[zero_idx, second_idx]
+            threshold_distances.append(
+                (z_value, zero_coord, second_coord, distance)
+            )
+     
+    # 提取每個 Z 軸的最小距離
+    z_min_distances = []
+    for z_value, intersection_distances_matrix in intersection_distances:
+        if intersection_distances_matrix.size > 0:
+            z_min_distances.append((z_value, intersection_distances_matrix.min()))
+    
+    # 提取每個 Z 軸的最小距離
+    z_min_distances = []
+    for z_value, distances_matrix in intersection_distances:
+        if distances_matrix.size > 0:
+            z_min_distances.append((z_value, distances_matrix.min()))
+            
+    # 提取 z_value 和距離的最小值
+    z_values = [pair[0] for pair in threshold_distances]
+    distances = [pair[3] for pair in threshold_distances]
+    z_min = min(z_values) if z_values else None
+    z_max = max(z_values) if z_values else None
+    distance_min = min(distances) if distances else None
+
+    return all_distances, intersection_distances, threshold_distances, z_min, z_max, distance_min, z_min_distances
+
+def plot_3d_needle_positions(zero_needle, second_needle, circle_points, current_angle, xy_threshold, canvas_frame):
+    global fig, plt_name
+    # 創建3D圖形
+    fig = plt.figure(figsize=(6, 6), dpi=100)
+    ax = fig.add_subplot(111, projection='3d')
+
+    # 繪製 Pitch 圓周的點
+    ax.scatter(circle_points[:, 0], circle_points[:, 1], circle_points[:, 2], color='Black', s=10, label='Pitch')
+    
+    # 添加中心點
+    center_point = (0, 0, 0)
+    ax.scatter(center_point[0], center_point[1], center_point[2], color='Black', s=10)
+    
+    # 繪製 zero_needle
+    for idx, (x_interp, y_interp, z_interp) in enumerate(zero_needle):
+        label = 'Zero Needle ' if idx == 0 else None
+        ax.plot(x_interp, y_interp, z_interp, linestyle='-', color='Teal', alpha=0.8, label=label)
+
+    # 繪製 second_needle
+    for idx, (x_interp, y_interp, z_interp) in enumerate(second_needle):
+        label = 'Second Needle' if idx == 0 else None
+        ax.plot(x_interp, y_interp, z_interp, linestyle='-', color='SteelBlue', alpha=0.6, label=label)  
+
+    # 標示 zero_needle 與 second_needle 最近位置
+    all_distances, intersection_distances, threshold_distances, z_min, z_max, min_distance, z_min_distances = find_closest_points(
+        xy_threshold, zero_needle, second_needle)
+
+    points1 = np.array([pair[1] for pair in threshold_distances])  # Zero closed points (XYZ)
+    points2 = np.array([pair[2] for pair in threshold_distances])  # Second closed points (XYZ)
+
+    if points1.size > 0 and points2.size > 0:
+        ax.scatter(points1[:, 0], points1[:, 1], points1[:, 2], color='red', s=5, label='Zero closed point')
+        ax.scatter(points2[:, 0], points2[:, 1], points2[:, 2], color='orange', s=5, label='Second closed point')
+
+    # 設置圖例和標題
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    plt_name = f'Needle spacing (Degree: {current_angle}°)'
+    plt.title(plt_name)
+    
+    # 設置等比例的軸範圍
+    def set_equal_axis(ax, needle_data):
+        """設置 3D 圖軸的等比例範圍"""
+        all_x = np.concatenate([line[0] for line in needle_data])
+        all_y = np.concatenate([line[1] for line in needle_data])
+        all_z = np.concatenate([line[2] for line in needle_data])
+
+        x_range = np.max(all_x) - np.min(all_x)
+        y_range = np.max(all_y) - np.min(all_y)
+        z_range = np.max(all_z) - np.min(all_z)
+        max_range = max(x_range, y_range, z_range)
+
+        x_center, y_center, z_center = np.mean(all_x), np.mean(all_y), np.mean(all_z)
+        ax.set_xlim([x_center - max_range / 2, x_center + max_range / 2])
+        ax.set_ylim([y_center - max_range / 2, y_center + max_range / 2])
+        ax.set_zlim([z_center - max_range / 2, z_center + max_range / 2])
+
+    set_equal_axis(ax, zero_needle)
+    plt.legend()
+    plt.close()
+    
+    for widget in canvas_frame.winfo_children():
+         widget.destroy()  # 清空畫布
+
+    canvas = FigureCanvasTkAgg(fig, canvas_frame)
+    canvas_frame = canvas.get_tk_widget()
+    canvas_frame.grid(row=0, column=0, sticky="nsew")
+
+
+def process_data():
+    global zero_xyz_data, second_xyz_data, circle_points, output_folder
+    """處理數據"""
+    try:
+        # 從輸入框中讀取值，並更新 CONFIG
+        CONFIG['cavity'] = float(cavity_entry.get())
+        CONFIG['xy_threshold'] = float(xy_threshold_entry.get())
+        CONFIG['radius'] = float(radius_entry.get())
+        CONFIG['degree_step'] = int(degree_step_entry.get())
+        CONFIG['needle1_width'] = float(needle1_width_entry.get()) if needle1_width_entry.get() else 0.0
+        CONFIG['needle2_width'] = float(needle2_width_entry.get()) if needle2_width_entry.get() else 0.0
+        CONFIG['L_num'] = int(L_num_entry.get())
+        CONFIG['W_num'] = int(W_num_entry.get())
+        
+        # 驗證文件選擇
+        if not CONFIG['file_name_1']:
+            messagebox.showerror("錯誤", "請選擇 Excel 文件 1")
+            return
+        if tolerance_var.get() == "mixed" and not CONFIG['file_name_2']:
+            messagebox.showerror("錯誤", "請選擇 Excel 文件 2")
+            return
+
+        # 數據處理邏輯整合
+        try:
+            # 處理第一個針數據
+            zero_xyz_data = process_single_needle(
+                select_file=CONFIG['file_name_1'],
+                needle_width=CONFIG['needle1_width'],
+                l_num=CONFIG['L_num'],
+                w_num=CONFIG['W_num'],
+                cavity=CONFIG['cavity']
+            )
+        
+            # 處理第二個針數據（僅在混針分析模式下）
+            if tolerance_var.get() == "mixed":
+                second_xyz_data = process_single_needle(
+                    select_file=CONFIG['file_name_2'],
+                    needle_width=CONFIG['needle2_width'],
+                    l_num=CONFIG['L_num'],
+                    w_num=CONFIG['W_num'],
+                    cavity=CONFIG['cavity']
+                )
+            else:
+                second_xyz_data = zero_xyz_data
+        
+            # 生成圓周上的點（Pitch 半徑和角度步進）
+            circle_points = []
+            for angle in np.arange(0, 370, CONFIG['degree_step']):
+                theta = np.deg2rad(angle)  # 轉換角度為弧度
+                x = (CONFIG['radius']) * np.cos(theta)
+                y = (CONFIG['radius']) * np.sin(theta)
+                z = 0  # 假設圓在 xy 平面上
+                circle_points.append((x, y, z))
+
+            circle_points = np.array(circle_points)
+        
+            # 遍歷所有 circle_points，計算並輸出每個角度的結果
+            
+            angle_metrics = []
+            z_min_distances_per_angle = {}
+            print("小提醒：注意Z軸方向性\n")
+            
+            for idx, circle_point in enumerate(circle_points):
+                zero_needle = zero_xyz_data
+                translated_second_needle = translate_data_to_circle_points(
+                    needle_data=second_xyz_data, 
+                    circle_points=circle_points, 
+                    index=idx)
+
+                # 計算與 zero_needle 的最近點
+                all_distances, intersection_distances, threshold_distances, z_min, z_max, min_distance, z_min_distances = find_closest_points(
+                    CONFIG['xy_threshold'], zero_needle, translated_second_needle)
+
+                # 記錄當前角度的結果
+                angle_metrics.append({
+                    "degree": idx * CONFIG['degree_step'],
+                    "z_min": z_min,
+                    "z_max": z_max,
+                    "min_distance": min_distance})
+
+                # 儲存每個角度的 Z 軸最小距離數據
+                z_min_distances_per_angle[f"degree {idx * CONFIG['degree_step']}"] = z_min_distances
+
+                degree = idx * CONFIG['degree_step']
+                z_min_str = f"Min_Z: {z_min:.2f}, " if z_min is not None else ""
+                z_max_str = f"Max_Z: {z_max:.2f}" if z_max is not None else ""
+                distance_min_str = f"Min_Distance: {min_distance:.2f}, " if min_distance is not None else "針身間距皆大於搜尋距離"
+
+                print(f"Degree {degree}° - {distance_min_str}{z_min_str}{z_max_str}")
+
+            """ 將角度的總結果保存為主要工作表 """ 
+            df_metrics = pd.DataFrame(angle_metrics)
+
+            df_metrics['degree'] = df_metrics['degree'].map(lambda x: f"{x:.0f}")
+            df_metrics['min_distance'] = df_metrics['min_distance'].map(lambda x: f"{x:.2f}" if pd.notnull(x) else " ")
+            df_metrics['z_min'] = df_metrics['z_min'].map(lambda x: f"{x:.2f}" if pd.notnull(x) else " ")
+            df_metrics['z_max'] = df_metrics['z_max'].map(lambda x: f"{x:.2f}" if pd.notnull(x) else " ")
+            df_metrics = df_metrics[['degree', 'min_distance', 'z_min', 'z_max']]
+
+            # 建立新資料夾
+            cwd = os.getcwd()
+            datestring = datetime.strftime(datetime.now(), ' %Y%m%d')
+            output_folder = os.path.join(cwd, 'Needle_Spacing_output_file' + datestring)
+            if not os.path.exists(output_folder):
+                os.makedirs(output_folder)
+                
+            output_file = os.path.join(output_folder, "degree_minimum_gap.xlsx")  # 自動生成保存路徑
+            with pd.ExcelWriter(output_file) as writer:
+                # 主表
+                df_metrics.to_excel(writer, sheet_name='Summary', index=False)
+
+                # 每個角度的 Z 軸數據
+                for degree_label, z_min_distances in z_min_distances_per_angle.items():
+                    df_z_min = pd.DataFrame(z_min_distances, columns=["Z_value", "Min_Distance"])
+                    df_z_min.to_excel(writer, sheet_name=degree_label, index=False)
+                    
+            """ 繪製3D圖形顯示兩個針的移動及最近距離點"""
+            # 移動 zero_needle 到指定 circle_point 位置
+            zero_needle = zero_xyz_data
+            second_needle = translate_data_to_circle_points(
+                needle_data=second_xyz_data, 
+                circle_points=circle_points, 
+                index=CONFIG['zero_deg_index']
+            )
+            """繪製兩針位置"""
+            plot_3d_needle_positions(
+                zero_needle=zero_needle,
+                second_needle=second_needle,
+                circle_points=circle_points,
+                current_angle = CONFIG['zero_deg_index'] * CONFIG['degree_step'],
+                xy_threshold=CONFIG['xy_threshold'],
+                canvas_frame=canvas_frame
+            )
+            
+            if output_file:     
+                messagebox.showinfo("完成", "數據處理完成")
+                output_label.config(text=f"資料輸出位置：{output_file}")
+            else:
+                output_label.config(text="資料輸出位置：尚未保存")
+        except Exception as e:
+            messagebox.showerror("錯誤", f"數據處理時發生錯誤：\n{e}")
+
+    except ValueError as e:
+        messagebox.showerror("錯誤", f"輸入數據無效：\n{e}")
+""" ■■■■■■■■■主程式■■■■■■■■■ """
+# 創建主視窗
+root = tk.Tk()
+root.title("Needle_spacing_Analysis")
+root.geometry("1000x700")
+
+# 創建單一標籤頁框架
+frame = ttk.Frame(root)
+frame.pack(expand=True, fill="both")
+
+# 創建左邊框架 (檔案範圍輸入)
+left_frame = ttk.Frame(frame)
+left_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+
+# 創建右邊框架 (圖片預覽和設定)
+right_frame = ttk.Frame(frame)
+right_frame.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
+
+# 設定框架權重，避免空間分配不均
+# frame.columnconfigure(0, weight=1)
+# frame.columnconfigure(1, weight=1)
+# frame.rowconfigure(0, weight=1)
+
+# 創建 Radiobutton 選擇分析形式
+tolerance_var = tk.StringVar(value="single")  # 預設為單針分析
+tk.Label(left_frame, text="選擇分析形式:").grid(row=0, column=0, columnspan=2, sticky="w", pady=5)
+
+tk.Radiobutton(left_frame, text="單針分析", variable=tolerance_var, value="single", command=update_analysis_type).grid(row=1, column=0, sticky="ew")
+tk.Radiobutton(left_frame, text="混針分析", variable=tolerance_var, value="mixed", command=update_analysis_type).grid(row=1, column=1, sticky="ew")
+
+# 在框架中添加選擇檔案的按鈕和標籤
+file_button_1 = tk.Button(left_frame, text="選擇Excel檔案 1", command=select_file_1, width=20)
+file_button_1.grid(row=3, column=0, pady=10)
+file_label_1 = tk.Label(left_frame, text="未選擇文件 1", wraplength=250)
+file_label_1.grid(row=4, column=0, pady=5, sticky="ew")
+
+file_button_2 = tk.Button(left_frame, text="選擇Excel檔案 2", command=select_file_2, width=20)
+file_button_2.grid(row=3, column=1, pady=10)
+file_label_2 = tk.Label(left_frame, text="未選擇文件 2", wraplength=250)
+file_label_2.grid(row=4, column=1, pady=5, sticky="ew")
+
+# 初始化狀態，默認隱藏第二個檔案選擇
+file_button_2.grid_remove()
+file_label_2.grid_remove()
+
+# 添加針寬輸入框
+needle1_width_label = tk.Label(left_frame, text="針寬 1 (um)")
+needle1_width_label.grid(row=5, column=0, sticky="ew", pady=5)
+needle1_width_entry = tk.Entry(left_frame, width=20)
+needle1_width_entry.grid(row=6, column=0, pady=5, sticky="n")
+
+needle2_width_label = tk.Label(left_frame, text="針寬 2 (um)")
+needle2_width_label.grid(row=5, column=1, sticky="ew", pady=5)
+needle2_width_entry = tk.Entry(left_frame, width=20)
+needle2_width_entry.grid(row=6, column=1, pady=5, sticky="n")
+
+# 初始化狀態，默認隱藏第二個針寬
+needle2_width_label.grid_remove()
+needle2_width_entry.grid_remove()
+
+# 設置預設值
+cavity_var = tk.StringVar(value="")  # 預設值為 2700
+L_num_var = tk.StringVar(value="100")    # 預設值為 100
+W_num_var = tk.StringVar(value="10")    # 預設值為 10
+xy_threshold_var = tk.StringVar(value="10")  # 預設值為 10
+radius_var = tk.StringVar(value="")       # 預設值為 100
+degree_step_var = tk.StringVar(value="10")   # 預設值為 10
+
+# 添加腔體輸入框
+tk.Label(left_frame, text="Cavity").grid(row=7, column=0, columnspan=2, sticky="ew", pady=5)
+cavity_entry = tk.Entry(left_frame, width=20, textvariable=cavity_var)  # 使用 StringVar
+cavity_entry.grid(row=8, column=0, columnspan=2, pady=0, sticky="n")
+
+# 添加長度節點數輸入框
+tk.Label(left_frame, text="長度擬合節點數量").grid(row=9, column=0, columnspan=2, sticky="ew", pady=5)
+L_num_entry = tk.Entry(left_frame, width=20, textvariable=L_num_var)  # 使用 StringVar
+L_num_entry.grid(row=10, column=0, columnspan=2, pady=0, sticky="n")
+
+# 添加厚度節點數輸入框
+tk.Label(left_frame, text="寬度擬合節點數量").grid(row=11, column=0, columnspan=2, sticky="ew", pady=5)
+W_num_entry = tk.Entry(left_frame, width=20, textvariable=W_num_var)  # 使用 StringVar
+W_num_entry.grid(row=12, column=0, columnspan=2, pady=0, sticky="n")
+
+# 添加 XY 搜尋範圍輸入框
+tk.Label(left_frame, text="搜尋範圍 (um):").grid(row=13, column=0, columnspan=2, sticky="ew", pady=5)
+xy_threshold_entry = tk.Entry(left_frame, width=20, textvariable=xy_threshold_var)  # 使用 StringVar
+xy_threshold_entry.grid(row=14, column=0, columnspan=2, pady=0, sticky="n")
+
+# 添加 Pitch 半徑輸入框
+tk.Label(left_frame, text="Pitch (um):").grid(row=15, column=0, columnspan=2, sticky="ew", pady=5)
+radius_entry = tk.Entry(left_frame, width=20, textvariable=radius_var)  # 使用 StringVar
+radius_entry.grid(row=16, column=0, columnspan=2, pady=0, sticky="n")
+
+# 添加分析角度間隔輸入框
+tk.Label(left_frame, text="分析角度間隔 (度):").grid(row=17, column=0, columnspan=2, sticky="ew", pady=5)
+degree_step_entry = tk.Entry(left_frame, width=20, textvariable=degree_step_var)
+degree_step_entry.grid(row=18, column=0, columnspan=2, pady=0, sticky="n")
+
+# 開始處理按鈕
+process_button = tk.Button(left_frame, text="處理數據", command=process_data, width=15)
+process_button.grid(row=19, column=0, columnspan=2, pady=20)
+
+# 添加顯示資料輸出位置的 Label
+output_label = tk.Label(left_frame, text="資料輸出位置：尚未保存", wraplength=300)
+output_label.grid(row=20, column=0, columnspan=2, pady=10)
+
+
+# 在 right_frame 中創建子框架
+canvas_frame = ttk.Frame(right_frame)
+canvas_frame.grid(row=0, column=0, sticky="nsew")
+
+# 添加 button_frame 用於顯示按鈕
+button_frame = ttk.Frame(right_frame)
+button_frame.grid(row=1, column=0, sticky="ew")
+
+# 添加 "<", ">", 和 "保存圖片" 按鈕
+tk.Button(button_frame, text="<", command=lambda: update_angle(-1)).grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+tk.Button(button_frame, text=">", command=lambda: update_angle(1)).grid(row=0, column=2, padx=5, pady=5, sticky="ew")
+tk.Button(button_frame, text="保存圖片", command=save_image).grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+
+# 啟動主迴圈
+root.mainloop()
